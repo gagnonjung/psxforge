@@ -7,18 +7,18 @@ PSX 롬 폴더 정리 스크립트
 실행 순서:
   [1] output/ 초기화 (기존 output 삭제 후 재생성)
   [2] 원본 폴더 스캔 및 그룹화
-        - 지역 약어 정규화  (K) -> (Korea)
-        - 멀티 디스크 그룹  (Disc 1)/(Disc 2) -> (2 Discs)
-        - 레거시 폴더명     (2 Discs) Game -> Game (2 Discs)
+      - 지역 약어 정규화 (K) -> (Korea)
+      - 멀티 디스크 그룹 (Disc 1)/(Disc 2) -> (2 Discs)
+      - 레거시 폴더명 (2 Discs) Game -> Game (2 Discs)
   [3] output/ 에 복사
-        - 멀티 트랙 cue: bin 병합 + cu2 생성
-        - 싱글 트랙 cue: 그대로 복사
-  [4] MULTIDISC.LST 생성 (output/ 루트에)
+      - 멀티 트랙 cue: bin 병합 + cu2 생성
+      - 싱글 트랙 cue: 그대로 복사
+  [4] MULTIDISC.LST 생성 (각 게임 하위 폴더 안에)
   [5] 썸네일 다운로드 (output/ 각 폴더에)
 
 사용법:
-  python psxforge.py              # 현재 폴더 대상
-  python psxforge.py /path/to/dir # 특정 폴더 대상
+  python psxforge.py                # 현재 폴더 대상
+  python psxforge.py /path/to/dir   # 특정 폴더 대상
 """
 
 import os
@@ -27,7 +27,6 @@ import sys
 import shutil
 import urllib.request
 from collections import defaultdict
-
 
 # ════════════════════════════════════════════════
 # 패턴 / 상수
@@ -50,24 +49,24 @@ LEGACY_PREFIX_PATTERN = re.compile(
 )
 
 REGION_ABBR_MAP = {
-    'J':   'Japan',  'JPN': 'Japan',
-    'U':   'USA',    'US':  'USA',
-    'E':   'Europe', 'EU':  'Europe',  'EUR': 'Europe',
-    'K':   'Korea',  'KR':  'Korea',   'KOR': 'Korea',
-    'W':   'World',
-    'A':   'Asia',   'AS':  'Asia',
-    'B':   'Brazil', 'BR':  'Brazil',
-    'F':   'France', 'FR':  'France',
-    'G':   'Germany','DE':  'Germany',
-    'I':   'Italy',  'IT':  'Italy',
-    'S':   'Spain',  'ES':  'Spain',
-    'AU':  'Australia', 'AUS': 'Australia',
-    'C':   'Canada', 'CA':  'Canada',
-    'CN':  'China',  'CHN': 'China',
-    'TW':  'Taiwan', 'TWN': 'Taiwan',
-    'SW':  'Sweden', 'SWE': 'Sweden',
-    'NL':  'Netherlands',
-    'RU':  'Russia', 'RUS': 'Russia',
+    'J': 'Japan', 'JPN': 'Japan',
+    'U': 'USA', 'US': 'USA',
+    'E': 'Europe', 'EU': 'Europe', 'EUR': 'Europe',
+    'K': 'Korea', 'KR': 'Korea', 'KOR': 'Korea',
+    'W': 'World',
+    'A': 'Asia', 'AS': 'Asia',
+    'B': 'Brazil', 'BR': 'Brazil',
+    'F': 'France', 'FR': 'France',
+    'G': 'Germany', 'DE': 'Germany',
+    'I': 'Italy', 'IT': 'Italy',
+    'S': 'Spain', 'ES': 'Spain',
+    'AU': 'Australia', 'AUS': 'Australia',
+    'C': 'Canada', 'CA': 'Canada',
+    'CN': 'China', 'CHN': 'China',
+    'TW': 'Taiwan', 'TWN': 'Taiwan',
+    'SW': 'Sweden', 'SWE': 'Sweden',
+    'NL': 'Netherlands',
+    'RU': 'Russia', 'RUS': 'Russia',
 }
 
 REGION_ABBR_PATTERN = re.compile(
@@ -81,16 +80,19 @@ SECONDS_PER_MINUTE = 60
 BLOCK_SIZES = {
     'MODE1/2048': 2048, 'MODE1/2352': 2352,
     'MODE2/2336': 2336, 'MODE2/2352': 2352,
-    'AUDIO':      2352,
+    'AUDIO': 2352,
 }
 
 # 썸네일
-SERIAL_REGEX  = re.compile(
+SERIAL_REGEX = re.compile(
     r'((SLPS|SLES|SLUS|SCPS|SCUS|SCES|SIPS|SLPM|SLEH|SLED|SCED|ESPM|PBPX|LSP)[_P\-])|(LSP9|907127)'
 )
 SERIAL_EXCEPTIONS = {'SLUSP': 'SLUS_', 'LSP9': 'LSP_9', '907127': 'LSP_907127'}
 COVER_URL = "https://ncirocco.github.io/PSIO-Library/images/covers_by_id/{}.bmp"
 BUFFER_SIZE = 1024 * 1024
+
+# 진단용: bin/cue가 없어서 스캔 단계에서 통째로 건너뛴 원본 폴더 이름 모음
+SKIPPED_NO_GAME_FILES: list[str] = []
 
 
 # ════════════════════════════════════════════════
@@ -111,12 +113,12 @@ def fix_legacy_prefix(name: str) -> str:
     if not m:
         return name
     disc_count = int(m.group(1))
-    remainder  = name[m.end():]
+    remainder = name[m.end():]
     return make_dest_name(remainder, disc_count)
 
 
 def make_dest_name(base_name: str, disc_count: int) -> str:
-    """Game (Japan) + 2  ->  Game (2 Discs) (Japan)"""
+    """Game (Japan) + 2 -> Game (2 Discs) (Japan)"""
     disc_tag = f"({disc_count} Discs)"
     m = REGION_PATTERN.search(base_name)
     if m:
@@ -169,7 +171,8 @@ def scan_source(parent: str) -> list[tuple[str, list[str]]]:
         if not os.path.isdir(full_path) or entry == 'output':
             continue
         if not has_game_files(full_path):
-            print(f"  ⏭  bin/cue 없음, 건너뜀: {entry}")
+            print(f"  ⏭ bin/cue 없음, 건너뜀: {entry}")
+            SKIPPED_NO_GAME_FILES.append(entry)
             continue
         entries.append(entry)
 
@@ -243,10 +246,10 @@ def stamp_to_sectors(stamp: str) -> int:
 
 
 def sectors_to_stamp(sectors: int) -> str:
-    mm  = sectors // (SECTORS_PER_SECOND * SECONDS_PER_MINUTE)
-    rem = sectors %  (SECTORS_PER_SECOND * SECONDS_PER_MINUTE)
-    ss  = rem // SECTORS_PER_SECOND
-    ff  = sectors % SECTORS_PER_SECOND
+    mm = sectors // (SECTORS_PER_SECOND * SECONDS_PER_MINUTE)
+    rem = sectors % (SECTORS_PER_SECOND * SECONDS_PER_MINUTE)
+    ss = rem // SECTORS_PER_SECOND
+    ff = sectors % SECTORS_PER_SECOND
     return f"{mm:02d}:{ss:02d}:{ff:02d}"
 
 
@@ -255,39 +258,41 @@ def generate_cu2(cue_path: str, bin_path: str) -> str:
     _, tracks = parse_cue(cue_path)
     if not tracks:
         raise ValueError(f"TRACK 없음: {cue_path}")
-    block_size    = BLOCK_SIZES.get(tracks[0]['type'].upper(), 2352)
+
+    block_size = BLOCK_SIZES.get(tracks[0]['type'].upper(), 2352)
     total_sectors = os.path.getsize(bin_path) // block_size
-    size_stamp    = sectors_to_stamp(total_sectors)
+    size_stamp = sectors_to_stamp(total_sectors)
 
     lines = [
         f"ntracks {len(tracks)}\r\n",
-        f"size      {size_stamp}\r\n",
-         "data1     00:02:00\r\n",
+        f"size {size_stamp}\r\n",
+        "data1 00:02:00\r\n",
     ]
+
     for track in tracks:
         tid, idxs = track['id'], track['indexes']
         if tid == 1:
             continue
         if len(idxs) == 1:
-            s     = stamp_to_sectors(idxs[0]['stamp'])
+            s = stamp_to_sectors(idxs[0]['stamp'])
             stamp = sectors_to_stamp(s + 2 * SECTORS_PER_SECOND)
-            lines.append(f"pregap{tid:02d}  {stamp}\r\n")
-            lines.append(f"track{tid:02d}   {stamp}\r\n")
+            lines.append(f"pregap{tid:02d} {stamp}\r\n")
+            lines.append(f"track{tid:02d} {stamp}\r\n")
         else:
             pregap = next((i['stamp'] for i in idxs if i['id'] == 0), idxs[0]['stamp'])
-            base   = next((i['stamp'] for i in idxs if i['id'] == 1), idxs[-1]['stamp'])
-            s      = stamp_to_sectors(base)
-            lines.append(f"pregap{tid:02d}  {pregap}\r\n")
-            lines.append(f"track{tid:02d}   {sectors_to_stamp(s + 2 * SECTORS_PER_SECOND)}\r\n")
+            base = next((i['stamp'] for i in idxs if i['id'] == 1), idxs[-1]['stamp'])
+            s = stamp_to_sectors(base)
+            lines.append(f"pregap{tid:02d} {pregap}\r\n")
+            lines.append(f"track{tid:02d} {sectors_to_stamp(s + 2 * SECTORS_PER_SECOND)}\r\n")
 
     end = stamp_to_sectors(size_stamp) + 2 * SECTORS_PER_SECOND
-    lines.append(f"\r\ntrk end   {sectors_to_stamp(end)}")
+    lines.append(f"\r\ntrk end {sectors_to_stamp(end)}")
     return ''.join(lines)
 
 
 def merge_bins(cue_path: str, output_bin_path: str):
     """멀티 bin을 순서대로 병합."""
-    cue_dir   = os.path.dirname(cue_path)
+    cue_dir = os.path.dirname(cue_path)
     bin_files, _ = parse_cue(cue_path)
     with open(output_bin_path, 'wb') as out:
         for bf in bin_files:
@@ -302,6 +307,7 @@ def write_merged_cue(cue_path: str, output_dir: str, new_bin_name: str):
     """단일 bin 참조 cue 생성."""
     with open(cue_path, 'r', encoding='utf-8-sig', errors='replace') as f:
         lines = f.readlines()
+
     new_lines, written = [], False
     for line in lines:
         if re.match(r'\s*FILE\s+', line, re.IGNORECASE):
@@ -310,6 +316,7 @@ def write_merged_cue(cue_path: str, output_dir: str, new_bin_name: str):
                 written = True
         else:
             new_lines.append(line)
+
     with open(os.path.join(output_dir, os.path.basename(cue_path)), 'w', encoding='utf-8') as f:
         f.writelines(new_lines)
 
@@ -331,190 +338,251 @@ def copy_non_bin_cue_files(src_folder: str, dest_dir: str):
             shutil.copy2(fpath, dst)
 
 
-def process_group(dest_name: str, src_paths: list[str], output_base: str):
+def _list_disc_units(src: str) -> list:
+    """
+    한 원본 폴더(src) 안에 디스크가 몇 개 들어있는지 판단해서,
+    디스크별 대표 cue 파일명 목록을 반환한다 (cue가 없으면 [None]).
+
+    - cue가 2개 이상 있으면: 폴더 하나에 여러 디스크가 합쳐져 있는 경우
+      (예: "Xenogears (Japan) (2 Discs)/disc1.cue, disc2.cue")
+      → cue 파일명 리스트를 그대로 반환 (디스크별로 1개씩)
+    - cue가 1개면: 평범한 단일 디스크 폴더 → [그 cue 파일명]
+    - cue가 없으면: bin 유무에 따라 [None] (bin 기반 처리는 호출부에서 처리)
+    """
+    cues = sorted(f for f in os.listdir(src) if f.lower().endswith('.cue'))
+    if cues:
+        return cues
+    return [None]
+
+
+def process_group(dest_name: str, src_paths: list, output_base: str):
     """
     (dest_name, src_paths) 하나를 처리해서 output_base/dest_name/ 에 저장.
+    - src_paths가 1개이고 그 폴더 안에 cue/bin이 디스크 1세트뿐이면: 싱글 디스크 → 그대로 처리
+    - 그 외(= 디스크가 2개 이상으로 판단되는 모든 경우):
+        · src_paths가 여러 개 (폴더가 Disc 1/ Disc 2 처럼 분리된 경우), 또는
+        · src_paths가 1개지만 그 폴더 안에 cue가 2개 이상 들어있는 경우
+          (예: "Game (2 Discs)/disc1.cue, disc2.cue" 처럼 한 폴더에 모여있는 경우)
+      → 각 디스크를 독립적으로 처리해서 대표 폴더에 모으고 MULTIDISC.LST 생성
 
-    - src_paths가 1개: 싱글 디스크 → 그대로 처리
-    - src_paths가 여러 개: 멀티 디스크 폴더 →
-        각 디스크를 독립적으로 처리해서 대표 폴더에 모으고 MULTIDISC.LST 생성
     반환: 'merged' | 'copied' | 'skipped'
     """
     dest_dir = os.path.join(output_base, dest_name)
     os.makedirs(dest_dir, exist_ok=True)
 
-    # ── 멀티 디스크 폴더 (src_paths >= 2) ──────────────────
-    if len(src_paths) >= 2:
-        cue_names = []
-        for src in src_paths:
-            cues = sorted(f for f in os.listdir(src) if f.lower().endswith('.cue'))
-            if not cues:
-                # cue 없으면 그냥 복사
-                for fname in os.listdir(src):
-                    fpath = os.path.join(src, fname)
-                    if os.path.isfile(fpath):
-                        shutil.copy2(fpath, os.path.join(dest_dir, fname))
-                continue
+    # ── 디스크 단위 목록 구성 ───────────────────────────────
+    # (소스 폴더 경로, 그 폴더 안에서 사용할 cue 파일명 또는 None) 의 리스트.
+    # - 폴더가 디스크별로 분리되어 있으면: src_paths 길이만큼 항목이 생김
+    # - 폴더 하나에 cue가 여러 개 모여 있으면: 그 폴더 하나에서 여러 항목이 생김
+    disc_units = []
+    for src in src_paths:
+        for cue_name in _list_disc_units(src):
+            disc_units.append((src, cue_name))
 
-            cue_path = os.path.join(src, cues[0])
-            bin_files, tracks = parse_cue(cue_path)
-            cue_stem = os.path.splitext(cues[0])[0]
+    is_multi_disc = len(disc_units) >= 2
 
-            if len(tracks) >= 2:
-                # 멀티 트랙: bin 병합 + cu2 생성
-                merged_bin_name = cue_stem + '.bin'
-                merged_bin_path = os.path.join(dest_dir, merged_bin_name)
+    # ── 싱글 디스크 (디스크 1개로 확정된 경우) ───────────────────────────
+    if not is_multi_disc:
+        src = src_paths[0]
+        all_cues = sorted(f for f in os.listdir(src) if f.lower().endswith('.cue'))
 
-                if len(bin_files) <= 1:
-                    src_bin = os.path.join(src, bin_files[0]) if bin_files else None
-                    if src_bin and os.path.exists(src_bin):
-                        shutil.copy2(src_bin, merged_bin_path)
-                else:
-                    merge_bins(cue_path, merged_bin_path)
+        if not all_cues:
+            for fname in os.listdir(src):
+                fpath = os.path.join(src, fname)
+                if os.path.isfile(fpath):
+                    shutil.copy2(fpath, os.path.join(dest_dir, fname))
+            return 'copied'
 
-                # 단일 bin 참조 cue 생성
-                write_merged_cue(cue_path, dest_dir, merged_bin_name)
+        cue_path = os.path.join(src, all_cues[0])
+        bin_files, tracks = parse_cue(cue_path)
 
-                # cu2 생성
-                out_cue_path = os.path.join(dest_dir, cue_stem + '.cue')
-                cu2_content = generate_cu2(out_cue_path, merged_bin_path)
-                with open(os.path.join(dest_dir, cue_stem + '.cu2'), 'w', encoding='utf-8') as f:
-                    f.write(cu2_content)
-                cue_names.append(cue_stem + '.cue')
+        if len(tracks) < 2:
+            # 싱글 트랙 → 그대로 복사
+            for fname in os.listdir(src):
+                fpath = os.path.join(src, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                new_fname = expand_region_abbr(fname)
+                dst = os.path.join(dest_dir, new_fname)
+                shutil.copy2(fpath, dst)
+
+                if new_fname.lower().endswith('.cue'):
+                    with open(dst, 'r', encoding='utf-8-sig', errors='replace') as f:
+                        cue_content = f.read()
+                    new_cue = re.sub(
+                        r'(FILE\s+["\'])([^"\']+)(["\'])',
+                        lambda m: f'{m.group(1)}{expand_region_abbr(m.group(2))}{m.group(3)}',
+                        cue_content, flags=re.IGNORECASE
+                    )
+                    if new_cue != cue_content:
+                        with open(dst, 'w', encoding='utf-8') as f:
+                            f.write(new_cue)
+            return 'copied'
+
+        # 멀티 트랙 싱글 디스크 → bin 병합 + cu2 생성
+        cue_stem = os.path.splitext(all_cues[0])[0]
+        merged_bin_name = cue_stem + '.bin'
+        merged_bin_path = os.path.join(dest_dir, merged_bin_name)
+
+        if len(bin_files) <= 1:
+            src_bin = os.path.join(src, bin_files[0]) if bin_files else None
+            if src_bin and os.path.exists(src_bin):
+                shutil.copy2(src_bin, merged_bin_path)
             else:
-                # 싱글 트랙: 파일명 약어 정규화 후 복사
-                for fname in os.listdir(src):
-                    fpath = os.path.join(src, fname)
-                    if not os.path.isfile(fpath):
-                        continue
-                    new_fname = expand_region_abbr(fname)
-                    dst = os.path.join(dest_dir, new_fname)
-                    shutil.copy2(fpath, dst)
-                    if new_fname.lower().endswith('.cue'):
-                        with open(dst, 'r', encoding='utf-8-sig', errors='replace') as f:
-                            cue_content = f.read()
-                        new_cue = re.sub(
-                            r'(FILE\s+["\'])([^"\']+)(["\'])',
-                            lambda m: f'{m.group(1)}{expand_region_abbr(m.group(2))}{m.group(3)}',
-                            cue_content, flags=re.IGNORECASE
-                        )
-                        if new_cue != cue_content:
-                            with open(dst, 'w', encoding='utf-8') as f:
-                                f.write(new_cue)
-                        cue_names.append(new_fname)
+                raise FileNotFoundError(f"bin 파일 없음: {src}")
+        else:
+            merge_bins(cue_path, merged_bin_path)
 
-            # bmp 등 나머지 파일 복사
-            copy_non_bin_cue_files(src, dest_dir)
+        write_merged_cue(cue_path, dest_dir, merged_bin_name)
+        cu2_content = generate_cu2(os.path.join(dest_dir, cue_stem + '.cue'), merged_bin_path)
+        with open(os.path.join(dest_dir, cue_stem + '.cu2'), 'w', encoding='utf-8') as f:
+            f.write(cu2_content)
 
-        # MULTIDISC.LST 생성
-        if cue_names:
-            lst_path = os.path.join(dest_dir, 'MULTIDISC.LST')
-            with open(lst_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(cue_names) + '\n')
-
+        copy_non_bin_cue_files(src, dest_dir)
         return 'merged'
 
-    # ── 싱글 디스크 (src_paths == 1) ───────────────────────
-    src = src_paths[0]
-    all_cues = sorted(f for f in os.listdir(src) if f.lower().endswith('.cue'))
+    # ── 멀티 디스크 (디스크 2개 이상으로 확정된 경우) ──────────────────
+    disc_names = []  # MULTIDISC.LST 에 적힐 "디스크당 대표 파일명" 목록
+    # 같은 src 폴더에서 이미 복사한 "cue/bin 외 파일"은 중복 복사하지 않도록 추적
+    copied_extra_srcs = set()
 
-    if not all_cues:
-        for fname in os.listdir(src):
-            fpath = os.path.join(src, fname)
-            if os.path.isfile(fpath):
-                shutil.copy2(fpath, os.path.join(dest_dir, fname))
-        return 'copied'
+    for disc_index, (src, cue_name) in enumerate(disc_units, start=1):
+        if cue_name is None:
+            # cue 없으면 bin(또는 그 외 파일)을 그대로 복사하고,
+            # 대표 bin 파일명을 디스크 목록에 기록한다.
+            copied_bin_name = None
+            for fname in sorted(os.listdir(src)):
+                fpath = os.path.join(src, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                new_fname = expand_region_abbr(fname)
+                dst_path = os.path.join(dest_dir, new_fname)
+                # 디스크별 파일명이 겹치면(예: 둘 다 "game.bin") Disc N 접두사를 붙여 구분
+                if os.path.exists(dst_path):
+                    stem, ext = os.path.splitext(new_fname)
+                    new_fname = f"{stem} (Disc {disc_index}){ext}"
+                    dst_path = os.path.join(dest_dir, new_fname)
+                shutil.copy2(fpath, dst_path)
+                if copied_bin_name is None and new_fname.lower().endswith('.bin'):
+                    copied_bin_name = new_fname
+            if copied_bin_name:
+                disc_names.append(copied_bin_name)
+            copied_extra_srcs.add(src)
+            continue
 
-    cue_path = os.path.join(src, all_cues[0])
-    bin_files, tracks = parse_cue(cue_path)
+        cue_path = os.path.join(src, cue_name)
+        bin_files, tracks = parse_cue(cue_path)
+        cue_stem = os.path.splitext(cue_name)[0]
 
-    if len(tracks) < 2:
-        # 싱글 트랙 → 그대로 복사
-        for fname in os.listdir(src):
-            fpath = os.path.join(src, fname)
-            if not os.path.isfile(fpath):
-                continue
-            new_fname = expand_region_abbr(fname)
-            dst = os.path.join(dest_dir, new_fname)
-            shutil.copy2(fpath, dst)
-            if new_fname.lower().endswith('.cue'):
-                with open(dst, 'r', encoding='utf-8-sig', errors='replace') as f:
-                    cue_content = f.read()
-                new_cue = re.sub(
-                    r'(FILE\s+["\'])([^"\']+)(["\'])',
-                    lambda m: f'{m.group(1)}{expand_region_abbr(m.group(2))}{m.group(3)}',
-                    cue_content, flags=re.IGNORECASE
-                )
-                if new_cue != cue_content:
-                    with open(dst, 'w', encoding='utf-8') as f:
-                        f.write(new_cue)
-        return 'copied'
+        # 같은 dest_dir 안에서 cue stem이 겹치면(여러 디스크가 같은 "game.cue"를 쓰는 경우,
+        # 또는 한 폴더 안의 여러 cue가 우연히 같은 stem을 갖는 경우)
+        # Disc N 접미사를 붙여 구분한다.
+        final_stem = cue_stem
+        if any(n.startswith(cue_stem + '.') for n in disc_names) or \
+           os.path.exists(os.path.join(dest_dir, cue_stem + '.cue')):
+            final_stem = f"{cue_stem} (Disc {disc_index})"
 
-    # 멀티 트랙 싱글 디스크 → bin 병합 + cu2 생성
-    cue_stem        = os.path.splitext(all_cues[0])[0]
-    merged_bin_name = cue_stem + '.bin'
-    merged_bin_path = os.path.join(dest_dir, merged_bin_name)
+        if len(tracks) >= 2:
+            # 멀티 트랙: bin 병합 + cu2 생성
+            merged_bin_name = final_stem + '.bin'
+            merged_bin_path = os.path.join(dest_dir, merged_bin_name)
 
-    if len(bin_files) <= 1:
-        src_bin = os.path.join(src, bin_files[0]) if bin_files else None
-        if src_bin and os.path.exists(src_bin):
-            shutil.copy2(src_bin, merged_bin_path)
+            if len(bin_files) <= 1:
+                src_bin = os.path.join(src, bin_files[0]) if bin_files else None
+                if src_bin and os.path.exists(src_bin):
+                    shutil.copy2(src_bin, merged_bin_path)
+            else:
+                merge_bins(cue_path, merged_bin_path)
+
+            # 단일 bin 참조 cue 생성
+            write_merged_cue(cue_path, dest_dir, merged_bin_name)
+            generated_cue_path = os.path.join(dest_dir, os.path.basename(cue_path))
+            final_cue_path = os.path.join(dest_dir, final_stem + '.cue')
+            if generated_cue_path != final_cue_path:
+                os.replace(generated_cue_path, final_cue_path)
+
+            # cu2 생성
+            cu2_content = generate_cu2(final_cue_path, merged_bin_path)
+            with open(os.path.join(dest_dir, final_stem + '.cu2'), 'w', encoding='utf-8') as f:
+                f.write(cu2_content)
+
+            disc_names.append(final_stem + '.cue')
         else:
-            raise FileNotFoundError(f"bin 파일 없음: {src}")
-    else:
-        merge_bins(cue_path, merged_bin_path)
+            # 싱글 트랙: 이 디스크가 참조하는 cue + bin 파일만 복사 (final_stem 기준으로 통일)
+            # 주의: 폴더 하나에 여러 디스크가 모여 있을 수 있으므로, 폴더 전체가 아니라
+            #       이 cue가 가리키는 bin 파일만 골라서 복사한다.
+            files_to_copy = [cue_name] + bin_files
+            for fname in files_to_copy:
+                fpath = os.path.join(src, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                fname_stem, fname_ext = os.path.splitext(fname)
+                new_fname = expand_region_abbr(fname)
+                if fname_ext.lower() in ('.cue', '.bin') and fname_stem == cue_stem:
+                    new_fname = final_stem + fname_ext.lower()
+                dst = os.path.join(dest_dir, new_fname)
+                shutil.copy2(fpath, dst)
 
-    write_merged_cue(cue_path, dest_dir, merged_bin_name)
+                if new_fname.lower().endswith('.cue'):
+                    with open(dst, 'r', encoding='utf-8-sig', errors='replace') as f:
+                        cue_content = f.read()
+                    new_cue = re.sub(
+                        r'(FILE\s+["\'])([^"\']+)(["\'])',
+                        lambda m: f'{m.group(1)}{expand_region_abbr(m.group(2))}{m.group(3)}',
+                        cue_content, flags=re.IGNORECASE
+                    )
+                    # bin 파일명도 final_stem 기준으로 같이 바꿔준다
+                    new_cue = re.sub(
+                        r'(FILE\s+["\'])([^"\']+)(["\'])',
+                        lambda m: f'{m.group(1)}{final_stem}.bin{m.group(3)}'
+                                  if os.path.splitext(m.group(2))[0] == cue_stem else m.group(0),
+                        new_cue, flags=re.IGNORECASE
+                    )
+                    if new_cue != cue_content:
+                        with open(dst, 'w', encoding='utf-8') as f:
+                            f.write(new_cue)
 
-    cu2_content = generate_cu2(os.path.join(dest_dir, cue_stem + '.cue'), merged_bin_path)
-    with open(os.path.join(dest_dir, cue_stem + '.cu2'), 'w', encoding='utf-8') as f:
-        f.write(cu2_content)
+            disc_names.append(final_stem + '.cue')
 
-    copy_non_bin_cue_files(src, dest_dir)
+        # bmp 등 나머지 파일 복사 (폴더당 한 번만 — 폴더에 디스크가 여러 개 있어도 중복 복사 방지)
+        if src not in copied_extra_srcs:
+            copy_non_bin_cue_files(src, dest_dir)
+            copied_extra_srcs.add(src)
+
+    # MULTIDISC.LST 생성 (cue가 있든 없든, 디스크 수만큼 채워졌으면 생성)
+    if len(disc_names) >= 2:
+        lst_path = os.path.join(dest_dir, 'MULTIDISC.LST')
+        with open(lst_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(disc_names) + '\n')
+
     return 'merged'
 
 
-# ════════════════════════════════════════════════
-# [4] MULTIDISC.LST
-# ════════════════════════════════════════════════
+def repair_missing_multidisc_lst(dest_dir: str) -> bool:
+    """
+    이미 처리되어 output/ 에 존재하는 멀티디스크 게임 폴더인데
+    (구버전 스크립트로 만들어졌거나 등의 이유로) MULTIDISC.LST가 없는 경우,
+    폴더 안의 .cue / .bin 목록만 보고 MULTIDISC.LST를 새로 만들어준다.
 
-def write_multidisc_lst(output_base: str, groups: list):
-    """멀티 디스크 그룹(disc 폴더가 여럿이었던 것)을 MULTIDISC.LST 에 기록."""
-    multi_groups = {}
-    for dest_name, src_paths in groups:
-        if len(src_paths) >= 2:
-            # 각 src의 cue 파일명 수집
-            cue_names = []
-            for src in src_paths:
-                for fname in sorted(os.listdir(os.path.join(output_base, dest_name))
-                                    if os.path.isdir(os.path.join(output_base, dest_name))
-                                    else []):
-                    if fname.lower().endswith('.cue'):
-                        cue_names.append(fname)
-            if cue_names:
-                multi_groups[dest_name] = cue_names
+    기존 cue/bin/cu2/bmp 등 어떤 파일도 수정하거나 덮어쓰지 않는다.
+    디스크가 2개 미만으로 판단되면 아무것도 하지 않고 False를 반환한다.
+    """
+    lst_path = os.path.join(dest_dir, 'MULTIDISC.LST')
+    if os.path.isfile(lst_path):
+        return False  # 이미 있음
 
-    # output 폴더 내 .cue 파일로 MULTIDISC.LST 작성
-    lines = []
-    for dest_name, _ in groups:
-        dest_dir = os.path.join(output_base, dest_name)
-        if not os.path.isdir(dest_dir):
-            continue
-        cues = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith('.cue'))
-        if len(cues) >= 2:
-            lines.extend(cues)
-            lines.append('')
+    cues = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith('.cue'))
+    bins = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith('.bin'))
 
-    if not lines:
-        return None
+    # cue가 있으면 cue를 우선 사용 (디스크별 1개씩 있다고 가정)
+    disc_entries = cues if len(cues) >= 2 else bins
 
-    while lines and lines[-1] == '':
-        lines.pop()
+    if len(disc_entries) < 2:
+        return False  # 멀티디스크로 볼 근거 부족 (싱글 디스크 게임일 가능성)
 
-    lst_path = os.path.join(output_base, 'MULTIDISC.LST')
     with open(lst_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
-    return lst_path
+        f.write('\n'.join(disc_entries) + '\n')
+    return True
 
 
 # ════════════════════════════════════════════════
@@ -547,21 +615,26 @@ def get_psx_serial(bin_path: str) -> str | None:
 
 def download_thumbnails(output_base: str):
     ok, fail, skip = [], [], []
+
     for entry in sorted(os.listdir(output_base)):
         folder = os.path.join(output_base, entry)
         if not os.path.isdir(folder):
             continue
+
         if any(f.lower().endswith('.bmp') for f in os.listdir(folder)):
             skip.append(entry)
             continue
+
         bins = sorted(f for f in os.listdir(folder) if f.lower().endswith('.bin'))
         if not bins:
             fail.append((entry, "bin 없음"))
             continue
+
         serial = get_psx_serial(os.path.join(folder, bins[0]))
         if not serial:
             fail.append((entry, "시리얼 인식 불가"))
             continue
+
         dest_bmp = os.path.join(folder, f"{serial}.bmp")
         print(f"  다운로드: {entry} ({serial})")
         try:
@@ -570,13 +643,13 @@ def download_thumbnails(output_base: str):
             print(f"    ✅ {serial}.bmp")
         except Exception:
             fail.append((entry, f"커버 없음 ({serial})"))
-            print(f"    ⚠  커버 없음: {serial}")
+            print(f"    ⚠ 커버 없음: {serial}")
             if os.path.exists(dest_bmp):
                 os.remove(dest_bmp)
 
     print(f"\n  결과: 다운로드 {len(ok)}개 / 스킵(이미 있음) {len(skip)}개 / 실패 {len(fail)}개")
     for entry, reason in fail:
-        print(f"  ✗ {entry}: {reason}")
+        print(f"    ✗ {entry}: {reason}")
 
 
 # ════════════════════════════════════════════════
@@ -603,49 +676,82 @@ def main():
     # [2] 원본 스캔 및 그룹화
     print("\n[2] 원본 스캔 및 그룹화")
     groups = scan_source(root)
-    multi  = [(d, s) for d, s in groups if len(s) >= 2]
+    multi = [(d, s) for d, s in groups if len(s) >= 2]
     single = [(d, s) for d, s in groups if len(s) == 1]
     print(f"  총 {len(groups)}개 폴더 (멀티 디스크 그룹 {len(multi)}개, 단독 {len(single)}개)")
     for dest_name, src_paths in multi:
-        print(f"  📀 {dest_name}")
+        print(f"    📀 {dest_name}")
         for src in src_paths:
             print(f"       <- {os.path.basename(src)}")
+    if single:
+        print(f"  단독 폴더 {len(single)}개:")
+        for dest_name, src_paths in single:
+            print(f"    📄 {dest_name}  <- {os.path.basename(src_paths[0])}")
+    if SKIPPED_NO_GAME_FILES:
+        print(f"  ⏭ bin/cue 없어서 통째로 건너뛴 폴더 {len(SKIPPED_NO_GAME_FILES)}개:")
+        for name in SKIPPED_NO_GAME_FILES:
+            print(f"    - {name}")
 
     # [3] output 에 복사 (이미 있는 폴더는 스킵)
     print("\n[3] output/ 에 복사 및 변환")
-    merged_count = copied_count = skipped_count = error_count = 0
+    merged_count = copied_count = skipped_count = error_count = repaired_count = 0
+
     for dest_name, src_paths in groups:
         dest_dir = os.path.join(output_base, dest_name)
+
         if os.path.isdir(dest_dir):
             # 폴더가 있어도 비어있으면 다시 처리
             if any(os.listdir(dest_dir)):
-                print(f"  ⏭  이미 존재, 건너뜀: {dest_name}")
-                skipped_count += 1
+                # 멀티 디스크 게임인데 MULTIDISC.LST 만 빠져 있으면 그것만 보충 생성
+                # (다른 파일들은 일절 건드리지 않음)
+                # 판단은 repair_missing_multidisc_lst 가 dest_dir 안의 실제 cue/bin 개수로 함
+                # (원본이 Disc 1/2로 분리된 폴더든, 한 폴더에 cue가 여러 개 모인 경우든 모두 커버)
+                if repair_missing_multidisc_lst(dest_dir):
+                    print(f"  🩹 MULTIDISC.LST 보충 생성: {dest_name}")
+                    repaired_count += 1
+                else:
+                    print(f"  ⏭ 이미 존재, 건너뜀: {dest_name}")
+                    skipped_count += 1
                 continue
             else:
                 print(f"  🔄 빈 폴더 재처리: {dest_name}")
                 os.rmdir(dest_dir)
+
         print(f"  처리 중: {dest_name}")
         try:
             result = process_group(dest_name, src_paths, output_base)
         except Exception as e:
-            print(f"    ⚠  오류: {e}")
+            print(f"    ⚠ 오류: {e}")
             error_count += 1
             continue
+
         if result == 'merged':
             print(f"    ✅ 멀티 트랙 -> bin 병합 + cu2 생성")
             merged_count += 1
         else:
             print(f"    📋 그대로 복사")
             copied_count += 1
-    print(f"\n  결과: cu2 생성 {merged_count}개 / 복사 {copied_count}개 "
-          f"/ 기존 {skipped_count}개 / 오류 {error_count}개")
 
-    # [4] MULTIDISC.LST
-    print("\n[4] MULTIDISC.LST 생성")
-    lst_path = write_multidisc_lst(output_base, groups)
-    if lst_path:
-        print(f"  ✅ {lst_path}")
+    print(f"\n  결과: cu2 생성 {merged_count}개 / 복사 {copied_count}개 "
+          f"/ 기존 {skipped_count}개 / LST 보충 {repaired_count}개 / 오류 {error_count}개")
+
+    # [4] MULTIDISC.LST 확인 (각 게임 폴더 안에 생성됨, output 루트에는 만들지 않음)
+    print("\n[4] MULTIDISC.LST 확인")
+    multi_dest_names = []
+    for dest_name, _src_paths in groups:
+        d = os.path.join(output_base, dest_name)
+        if not os.path.isdir(d):
+            continue
+        n_cue = sum(1 for f in os.listdir(d) if f.lower().endswith('.cue'))
+        n_bin = sum(1 for f in os.listdir(d) if f.lower().endswith('.bin'))
+        if max(n_cue, n_bin) >= 2:
+            multi_dest_names.append(dest_name)
+
+    if multi_dest_names:
+        for dest_name in multi_dest_names:
+            lst_path = os.path.join(output_base, dest_name, 'MULTIDISC.LST')
+            mark = "✅" if os.path.isfile(lst_path) else "✗ 없음"
+            print(f"  {mark}  {dest_name}/MULTIDISC.LST")
     else:
         print("  멀티 디스크 없음, 생성 안 함.")
 
@@ -658,4 +764,13 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        print("\n" + "=" * 60)
+        print(f"❌ 처리 중 오류가 발생했습니다: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("\n" + "=" * 60)
+        input("종료하려면 Enter 키를 누르세요...")
