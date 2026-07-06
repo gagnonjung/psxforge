@@ -11,9 +11,11 @@ PSX 롬 폴더 정리 스크립트
       - 멀티 디스크 그룹 (Disc 1)/(Disc 2) -> (2 Discs)
       - 레거시 폴더명 (2 Discs) Game -> Game (2 Discs)
   [3] output/ 에 복사
-      - 멀티 트랙 cue: bin 병합 + cu2 생성
-      - 싱글 트랙 cue: 그대로 복사
-  [4] MULTIDISC.LST 생성 (각 게임 하위 폴더 안에)
+      - bin 병합(필요시)은 트랙 수와 무관하게 항상 수행
+      - 멀티 트랙(CDDA 오디오 포함)인 경우만 cu2 시트 추가 생성
+      - 싱글 트랙(대부분의 일반 게임)은 cue/cu2 불필요, bin만 있으면 충분
+        (PSIO는 *.BIN/*.ISO/*.IMG 이미지만 직접 읽음)
+  [4] MULTIDISC.LST 생성 (각 게임 하위 폴더 안에, 항상 이미지(.bin) 파일명 기준)
   [5] 썸네일 다운로드 (output/ 각 폴더에)
 
 사용법:
@@ -395,35 +397,11 @@ def process_group(dest_name: str, src_paths: list, output_base: str):
 
         cue_path = os.path.join(src, all_cues[0])
         bin_files, tracks = parse_cue(cue_path)
-
-        if len(tracks) < 2:
-            # 싱글 트랙 → 그대로 복사
-            for fname in os.listdir(src):
-                fpath = os.path.join(src, fname)
-                if not os.path.isfile(fpath):
-                    continue
-                new_fname = expand_region_abbr(fname)
-                dst = os.path.join(dest_dir, new_fname)
-                shutil.copy2(fpath, dst)
-
-                if new_fname.lower().endswith('.cue'):
-                    with open(dst, 'r', encoding='utf-8-sig', errors='replace') as f:
-                        cue_content = f.read()
-                    new_cue = re.sub(
-                        r'(FILE\s+["\'])([^"\']+)(["\'])',
-                        lambda m: f'{m.group(1)}{expand_region_abbr(m.group(2))}{m.group(3)}',
-                        cue_content, flags=re.IGNORECASE
-                    )
-                    if new_cue != cue_content:
-                        with open(dst, 'w', encoding='utf-8') as f:
-                            f.write(new_cue)
-            return 'copied'
-
-        # 멀티 트랙 싱글 디스크 → bin 병합 + cu2 생성
         cue_stem = os.path.splitext(all_cues[0])[0]
         merged_bin_name = cue_stem + '.bin'
         merged_bin_path = os.path.join(dest_dir, merged_bin_name)
 
+        # bin 병합(필요시)은 트랙 수와 무관하게 항상 수행한다.
         if len(bin_files) <= 1:
             src_bin = os.path.join(src, bin_files[0]) if bin_files else None
             if src_bin and os.path.exists(src_bin):
@@ -433,10 +411,14 @@ def process_group(dest_name: str, src_paths: list, output_base: str):
         else:
             merge_bins(cue_path, merged_bin_path)
 
-        write_merged_cue(cue_path, dest_dir, merged_bin_name)
-        cu2_content = generate_cu2(os.path.join(dest_dir, cue_stem + '.cue'), merged_bin_path)
-        with open(os.path.join(dest_dir, cue_stem + '.cu2'), 'w', encoding='utf-8') as f:
-            f.write(cu2_content)
+        if len(tracks) >= 2:
+            # 멀티 트랙(CDDA 오디오 포함) → PSIO가 cu2 시트를 요구함
+            write_merged_cue(cue_path, dest_dir, merged_bin_name)
+            cu2_content = generate_cu2(os.path.join(dest_dir, cue_stem + '.cue'), merged_bin_path)
+            with open(os.path.join(dest_dir, cue_stem + '.cu2'), 'w', encoding='utf-8') as f:
+                f.write(cu2_content)
+        # 싱글 트랙(대부분의 일반 게임) → PSIO는 *.BIN/*.ISO/*.IMG 만 읽으므로
+        # cue/cu2 가 전혀 필요 없다. bin 하나만 있으면 충분.
 
         copy_non_bin_cue_files(src, dest_dir)
         return 'merged'
@@ -482,67 +464,36 @@ def process_group(dest_name: str, src_paths: list, output_base: str):
            os.path.exists(os.path.join(dest_dir, cue_stem + '.cue')):
             final_stem = f"{cue_stem} (Disc {disc_index})"
 
-        if len(tracks) >= 2:
-            # 멀티 트랙: bin 병합 + cu2 생성
-            merged_bin_name = final_stem + '.bin'
-            merged_bin_path = os.path.join(dest_dir, merged_bin_name)
+        # bin 병합(필요시)은 트랙 수와 무관하게 항상 수행한다.
+        merged_bin_name = final_stem + '.bin'
+        merged_bin_path = os.path.join(dest_dir, merged_bin_name)
 
-            if len(bin_files) <= 1:
-                src_bin = os.path.join(src, bin_files[0]) if bin_files else None
-                if src_bin and os.path.exists(src_bin):
-                    shutil.copy2(src_bin, merged_bin_path)
+        if len(bin_files) <= 1:
+            src_bin = os.path.join(src, bin_files[0]) if bin_files else None
+            if src_bin and os.path.exists(src_bin):
+                shutil.copy2(src_bin, merged_bin_path)
             else:
-                merge_bins(cue_path, merged_bin_path)
+                raise FileNotFoundError(f"bin 파일 없음: {src}")
+        else:
+            merge_bins(cue_path, merged_bin_path)
 
-            # 단일 bin 참조 cue 생성
+        if len(tracks) >= 2:
+            # 멀티 트랙(CDDA 오디오 포함) → PSIO가 cu2 시트를 요구함
+            # (cu2는 bin과 같은 이름으로 같은 폴더에 있으면 PSIO가 자동으로 찾아 짝지음)
             write_merged_cue(cue_path, dest_dir, merged_bin_name)
             generated_cue_path = os.path.join(dest_dir, os.path.basename(cue_path))
             final_cue_path = os.path.join(dest_dir, final_stem + '.cue')
             if generated_cue_path != final_cue_path:
                 os.replace(generated_cue_path, final_cue_path)
 
-            # cu2 생성
             cu2_content = generate_cu2(final_cue_path, merged_bin_path)
             with open(os.path.join(dest_dir, final_stem + '.cu2'), 'w', encoding='utf-8') as f:
                 f.write(cu2_content)
+        # 싱글 트랙(대부분의 일반 게임) → cue/cu2 불필요, bin만 있으면 됨
 
-            disc_names.append(final_stem + '.cue')
-        else:
-            # 싱글 트랙: 이 디스크가 참조하는 cue + bin 파일만 복사 (final_stem 기준으로 통일)
-            # 주의: 폴더 하나에 여러 디스크가 모여 있을 수 있으므로, 폴더 전체가 아니라
-            #       이 cue가 가리키는 bin 파일만 골라서 복사한다.
-            files_to_copy = [cue_name] + bin_files
-            for fname in files_to_copy:
-                fpath = os.path.join(src, fname)
-                if not os.path.isfile(fpath):
-                    continue
-                fname_stem, fname_ext = os.path.splitext(fname)
-                new_fname = expand_region_abbr(fname)
-                if fname_ext.lower() in ('.cue', '.bin') and fname_stem == cue_stem:
-                    new_fname = final_stem + fname_ext.lower()
-                dst = os.path.join(dest_dir, new_fname)
-                shutil.copy2(fpath, dst)
-
-                if new_fname.lower().endswith('.cue'):
-                    with open(dst, 'r', encoding='utf-8-sig', errors='replace') as f:
-                        cue_content = f.read()
-                    new_cue = re.sub(
-                        r'(FILE\s+["\'])([^"\']+)(["\'])',
-                        lambda m: f'{m.group(1)}{expand_region_abbr(m.group(2))}{m.group(3)}',
-                        cue_content, flags=re.IGNORECASE
-                    )
-                    # bin 파일명도 final_stem 기준으로 같이 바꿔준다
-                    new_cue = re.sub(
-                        r'(FILE\s+["\'])([^"\']+)(["\'])',
-                        lambda m: f'{m.group(1)}{final_stem}.bin{m.group(3)}'
-                                  if os.path.splitext(m.group(2))[0] == cue_stem else m.group(0),
-                        new_cue, flags=re.IGNORECASE
-                    )
-                    if new_cue != cue_content:
-                        with open(dst, 'w', encoding='utf-8') as f:
-                            f.write(new_cue)
-
-            disc_names.append(final_stem + '.cue')
+        # PSIO는 *.BIN 이미지를 직접 읽으므로 MULTIDISC.LST 에는 항상 bin 파일명을 적는다
+        # (cu2가 있어도 그건 같은 이름의 보조 시트일 뿐, LST 항목은 이미지 파일 기준)
+        disc_names.append(merged_bin_name)
 
         # bmp 등 나머지 파일 복사 (폴더당 한 번만 — 폴더에 디스크가 여러 개 있어도 중복 복사 방지)
         if src not in copied_extra_srcs:
@@ -558,27 +509,114 @@ def process_group(dest_name: str, src_paths: list, output_base: str):
     return 'merged'
 
 
+def repair_missing_cu2(dest_dir: str, src_paths: list) -> int:
+    """
+    이미 처리되어 output/ 에 존재하는 게임 폴더의 cu2 상태를 보정한다.
+    트랙 수 판단은 원본 폴더(src_paths)의 cue를 파싱해서 수행한다.
+
+    원본 폴더별로 cue를 찾아:
+      - 멀티 트랙(CDDA) 디스크이고 output에 cu2가 없으면 → cu2 생성
+      - 싱글 트랙 디스크이고 output에 cu2가 있으면 → 잘못 만들어진 cu2 삭제
+
+    output의 cue/cue.bak 에는 의존하지 않는다.
+    bin 파일은 삭제하거나 수정하지 않는다.
+
+    반환: 변경된 항목 개수.
+    """
+    count = 0
+
+    for src in src_paths:
+        src_cues = sorted(f for f in os.listdir(src) if f.lower().endswith('.cue'))
+        if not src_cues:
+            continue
+
+        for cue_name in src_cues:
+            src_cue_path = os.path.join(src, cue_name)
+            _, tracks = parse_cue(src_cue_path)
+            if not tracks:
+                continue
+
+            cue_stem = os.path.splitext(cue_name)[0]
+            # dest_dir 안에 같은 stem 의 bin/cu2 가 있는지 확인
+            # (파일명 충돌 방지로 stem 이 변경된 케이스도 있으므로 두 가지 다 시도)
+            for stem in (cue_stem, cue_stem):
+                out_bin  = os.path.join(dest_dir, stem + '.bin')
+                out_cu2  = os.path.join(dest_dir, stem + '.cu2')
+                out_cue  = os.path.join(dest_dir, stem + '.cue')
+
+                if not os.path.isfile(out_bin):
+                    continue
+
+                if len(tracks) >= 2:
+                    # 멀티 트랙: cu2 없으면 생성 (cue도 같이 필요)
+                    if not os.path.isfile(out_cu2):
+                        if not os.path.isfile(out_cue):
+                            # cue 가 없으면 원본에서 다시 써서 임시 사용 후 생성
+                            write_merged_cue(src_cue_path, dest_dir, stem + '.bin')
+                        try:
+                            cu2_content = generate_cu2(out_cue, out_bin)
+                        except Exception:
+                            continue
+                        with open(out_cu2, 'w', encoding='utf-8') as f:
+                            f.write(cu2_content)
+                        count += 1
+                else:
+                    # 싱글 트랙: cu2 있으면 삭제
+                    if os.path.isfile(out_cu2):
+                        os.remove(out_cu2)
+                        count += 1
+                break  # bin 을 찾았으면 다음 cue 로
+
+    return count
+
+
 def repair_missing_multidisc_lst(dest_dir: str) -> bool:
     """
-    이미 처리되어 output/ 에 존재하는 멀티디스크 게임 폴더인데
-    (구버전 스크립트로 만들어졌거나 등의 이유로) MULTIDISC.LST가 없는 경우,
-    폴더 안의 .cue / .bin 목록만 보고 MULTIDISC.LST를 새로 만들어준다.
+    output/ 에 존재하는 멀티디스크 게임 폴더의 MULTIDISC.LST를 점검하고,
+    필요하면 새로 만들거나 덮어쓴다.
 
-    기존 cue/bin/cu2/bmp 등 어떤 파일도 수정하거나 덮어쓰지 않는다.
+    다음 두 가지 경우를 모두 처리한다:
+      1) MULTIDISC.LST가 아예 없는 경우 → 새로 생성
+      2) MULTIDISC.LST는 있지만 내용이 "낡은" 경우 → 덮어쓰기
+         (예: cu2로 다시 처리되었는데 LST에는 옛날 .cue 항목이 그대로
+          남아있어서 PSIO가 디스크 파일을 못 찾는 경우)
+
+    cue/bin/cu2 파일 자체는 수정하거나 삭제하지 않는다 (LST 텍스트만 손댐).
     디스크가 2개 미만으로 판단되면 아무것도 하지 않고 False를 반환한다.
     """
     lst_path = os.path.join(dest_dir, 'MULTIDISC.LST')
-    if os.path.isfile(lst_path):
-        return False  # 이미 있음
 
-    cues = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith('.cue'))
     bins = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith('.bin'))
+    isos = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith(('.iso', '.img')))
+    cues = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith('.cue'))
 
-    # cue가 있으면 cue를 우선 사용 (디스크별 1개씩 있다고 가정)
-    disc_entries = cues if len(cues) >= 2 else bins
+    # PSIO는 *.BIN/*.ISO/*.IMG 이미지를 직접 읽는다. cu2는 그 옆에 있는
+    # CDDA 보조 시트일 뿐이므로 MULTIDISC.LST 에는 이미지 파일명을 적어야 한다.
+    # bin이 있으면 bin을 우선 사용, 없으면 iso/img, 그것도 없으면(이상 케이스) cue.
+    if len(bins) >= 2:
+        disc_entries = bins
+    elif len(isos) >= 2:
+        disc_entries = isos
+    else:
+        disc_entries = cues
 
     if len(disc_entries) < 2:
         return False  # 멀티디스크로 볼 근거 부족 (싱글 디스크 게임일 가능성)
+
+    if os.path.isfile(lst_path):
+        with open(lst_path, 'r', encoding='utf-8', errors='replace') as f:
+            existing_lines = [ln.strip() for ln in f if ln.strip()]
+
+        # 이미 있는 LST가 지금 폴더 상태와 정확히 일치하면 손대지 않는다
+        if existing_lines == disc_entries:
+            return False
+
+        # bin/iso 이미지가 있는데 LST 내용이 그것과 정확히 일치하지 않으면
+        # (옛날 .cue 항목이 남아있든, 잘못 만들어진 .cu2 항목이 적혀있든) 낡은 것으로 보고 덮어씀.
+        # bin/iso가 전혀 없어서 cue 기준으로 적힌 경우만 정상적인 기존 상태로 보고 그대로 둔다.
+        is_stale = bool(bins or isos)
+        if not is_stale:
+            return False
 
     with open(lst_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(disc_entries) + '\n')
@@ -694,7 +732,7 @@ def main():
 
     # [3] output 에 복사 (이미 있는 폴더는 스킵)
     print("\n[3] output/ 에 복사 및 변환")
-    merged_count = copied_count = skipped_count = error_count = repaired_count = 0
+    merged_count = copied_count = skipped_count = error_count = repaired_count = cu2_repaired_count = 0
 
     for dest_name, src_paths in groups:
         dest_dir = os.path.join(output_base, dest_name)
@@ -702,14 +740,27 @@ def main():
         if os.path.isdir(dest_dir):
             # 폴더가 있어도 비어있으면 다시 처리
             if any(os.listdir(dest_dir)):
-                # 멀티 디스크 게임인데 MULTIDISC.LST 만 빠져 있으면 그것만 보충 생성
+                did_something = False
+
+                # (1) 원본 cue 기준으로 싱글/멀티 트랙 판단 후 cu2 보정
+                #     싱글 트랙 → 잘못 만들어진 cu2 삭제
+                #     멀티 트랙 → cu2 누락 시 생성
+                n_cu2_fixed = repair_missing_cu2(dest_dir, src_paths)
+                if n_cu2_fixed:
+                    print(f"  🩹 cu2 보정 ({n_cu2_fixed}건): {dest_name}")
+                    cu2_repaired_count += n_cu2_fixed
+                    did_something = True
+
+                # (2) 멀티 디스크 게임인데 MULTIDISC.LST 만 빠져 있으면 그것만 보충 생성
                 # (다른 파일들은 일절 건드리지 않음)
-                # 판단은 repair_missing_multidisc_lst 가 dest_dir 안의 실제 cue/bin 개수로 함
+                # 판단은 repair_missing_multidisc_lst 가 dest_dir 안의 실제 cu2/cue/bin 개수로 함
                 # (원본이 Disc 1/2로 분리된 폴더든, 한 폴더에 cue가 여러 개 모인 경우든 모두 커버)
                 if repair_missing_multidisc_lst(dest_dir):
-                    print(f"  🩹 MULTIDISC.LST 보충 생성: {dest_name}")
+                    print(f"  🩹 MULTIDISC.LST 보충/갱신: {dest_name}")
                     repaired_count += 1
-                else:
+                    did_something = True
+
+                if not did_something:
                     print(f"  ⏭ 이미 존재, 건너뜀: {dest_name}")
                     skipped_count += 1
                 continue
@@ -726,14 +777,15 @@ def main():
             continue
 
         if result == 'merged':
-            print(f"    ✅ 멀티 트랙 -> bin 병합 + cu2 생성")
+            print(f"    ✅ bin 병합(필요시) + cu2 생성")
             merged_count += 1
         else:
             print(f"    📋 그대로 복사")
             copied_count += 1
 
     print(f"\n  결과: cu2 생성 {merged_count}개 / 복사 {copied_count}개 "
-          f"/ 기존 {skipped_count}개 / LST 보충 {repaired_count}개 / 오류 {error_count}개")
+          f"/ 기존 {skipped_count}개 / LST 보충 {repaired_count}개 "
+          f"/ cu2 보충 {cu2_repaired_count}개 / 오류 {error_count}개")
 
     # [4] MULTIDISC.LST 확인 (각 게임 폴더 안에 생성됨, output 루트에는 만들지 않음)
     print("\n[4] MULTIDISC.LST 확인")
@@ -742,9 +794,10 @@ def main():
         d = os.path.join(output_base, dest_name)
         if not os.path.isdir(d):
             continue
+        n_cu2 = sum(1 for f in os.listdir(d) if f.lower().endswith('.cu2'))
         n_cue = sum(1 for f in os.listdir(d) if f.lower().endswith('.cue'))
         n_bin = sum(1 for f in os.listdir(d) if f.lower().endswith('.bin'))
-        if max(n_cue, n_bin) >= 2:
+        if max(n_cu2, n_cue, n_bin) >= 2:
             multi_dest_names.append(dest_name)
 
     if multi_dest_names:
